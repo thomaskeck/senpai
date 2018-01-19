@@ -13,6 +13,7 @@ The paper states
 > ...
 > before generating x and y, Alice chooses a random bitstring s, long enough that it can’t be reasonably guessed.
 > Then, x consists of 0 and s (with some padding scheme), and if y is 0, then y likewise consists of 0 and s.''
+
 Both x and y are encrypted and send to Bob. However, Bob can trivially extract the answer of Alice at this point,
 because if x == y (meaning Alice choose No), the encrypted messages will be equal as well.
 
