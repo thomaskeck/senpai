@@ -1,94 +1,101 @@
+#! /usr/bin/env python3
+# Implements the SENPAI protocoll
+# http://sigtbd.csail.mit.edu/pubs/veryconference-paper10.pdf
+
 import numpy
-import sympy
-import hashlib
+
+from senpai import rsa
+from senpai import commitment
 
 
-def mod_inverse(a, n):
-    t = 0
-    newt = 1
-    r = n
-    newr = a
-    while newr != 0:
-        quotient = r // newr
-        t, newt = newt, t - quotient * newt 
-        r, newr = newr, r - quotient * newr
-    if r > 1:
-        raise RuntimeError("A is not invertible")
-    if t < 0:
-        t = t + n
-    return t
-
-
-def commitment(s):
-    return int(hashlib.sha256(bytes(s)).hexdigest(), 16)
-
-
-class Alice():
-    def __init__(self):
-        self.padding = numpy.random.randint(10000000, 99999999) * 1000
-        #self.p = sympy.randprime(10000,100000)
-        #self.q = sympy.randprime(10000,100000)
-        self.p = sympy.randprime(100,1000)
-        self.q = sympy.randprime(100,1000)
-        self.N = self.p * self.q
-        self.l = sympy.lcm(self.p-1, self.q-1)
-        self.e = 1
-        while self.l % self.e == 0:
-            self.e = sympy.randprime(1, self.l)
-        self.d = mod_inverse(self.e, self.l)
-
-    def get_public_information(self):
-        return {'public_key': self.e, 'rsa_modulus': self.N, 'padding': self.padding}
+class Alice(object):
+    """
+    Alice wants to check if she agrees with Bob on a certain question,
+    without leaking information about her own position in case Bob does not agree.
+    """
     
-    def encrypt_answer(self, answer_alice):
-        self.s = numpy.random.randint(10, 999) % self.N
-        self.c = commitment(self.s)
-        self.x = self.padding + self.s
-        if answer_alice:
-            self.y = self.padding + 1
-        else:
-            self.y = self.padding + self.s
-        self.cx = self.x**self.e % self.N
-        self.cy = self.y**self.e % self.N
+    def __init__(self):
+        """
+        Creates a rsa keypair for alice
+        """
+        self.rsa = rsa.RSA.create_new_keypair()
+
+    def encrypt_answer(self, answer):
+        """
+        Encrypts the answer using RSA
+        @param answer either True or False
+        """
+        self.x = numpy.random.randint(2, 999)
+        self.y = 1 if answer else self.x
+        # Encrypt messages and commit to secret x
+        self.cx = self.rsa.encrypt(self.x)
+        self.cy = self.rsa.encrypt(self.y)
+        self.c = commitment.create(self.x)
+        print(self.cx, self.cy)
         return (self.cx, self.cy, self.c)
     
-    def decrypt_answer(self, message_from_bob):
-        return message_from_bob**self.d % self.N
+    def decrypt_message(self, message):
+        """
+        Decrypts the message received from bob
+        @param message received from bob
+        """
+        # We do not remove the padding here, bob does this himself
+        return self.rsa.decrypt(message, use_padding=False)
     
-    def post_checks(self, message_from_bob):
-        self.final_answer = message_from_bob
+    def check_final_answer(self, final_answer):
+        """
+        We receive the final answer from bob. We return our initially used s, so bob an check that we sticked to the commited secret
+        @param final_answer either true (if both parties agreed on true) or false otherwise
+        """
+        self.final_answer = final_answer
         return self.x
 
     
-class Bob():
-    def __init__(self, public_information):
-        self.N = public_information['rsa_modulus']
-        self.padding = public_information['padding']
-        self.e = public_information['public_key']
+class Bob(object):
+    """
+    Bob wants to check if he agrees with Alice on a certain question,
+    without leaking information about his own position in case Alice does not agree.
+    """
 
-    def encrypt_answer(self, answer_bob, message_from_alice):
-        self.cx, self.cy, self.c = message_from_alice
-        self.r = numpy.random.randint(10000000, 99999999) % self.N
-        self.cr = self.r**self.e % self.N
-        if answer_bob:
-            self.cz = self.cy*self.cr % self.N
-        else:
-            self.cz = self.cx*self.cr % self.N
+    def __init__(self, public_key):
+        """
+        Creates a rsa object using the public key of Alice
+        @param public_key of alice
+        """
+        self.rsa = rsa.RSA.create_from_keypair(public_key=public_key)
+
+    def encrypt_answer(self, answer, message):
+        """
+        Encrypts the answer using RSA and append it to the message received from alice
+        @param answer either True or False
+        @param message from alice
+        """
+        self.cx, self.cy, self.c = message
+        self.r = numpy.random.randint(10000000, 99999999)
+        # We cannot use padding, otherwise we break the homomorphism
+        self.cr = self.rsa.encrypt(self.r, use_padding=False)
+        self.cz = self.cy*self.cr if answer else self.cx*self.cr
         return self.cz
     
-    def decrypt_answer(self, message_from_alice):
-        r = (message_from_alice * mod_inverse(self.r, self.N) - self.padding) % self.N
+    def decrypt_message(self, message):
+        """
+        Decrypts the message received from alice
+        @param message received from alice
+        """
+        r = (message * rsa.mod_inverse(self.r, self.rsa.N) - self.rsa.padding) % self.rsa.N
         self.final_answer = False
         if r == 1:
             self.final_answer = True
         else:
-            if commitment(r) != self.c:
-                raise RuntimeError("Commitment was violated")
+            commitment.check(r, self.c)
         return self.final_answer
     
-    def post_checks(self, message_from_alice):
-        x = message_from_alice
-        if commitment((x - self.padding) % self.N) != self.c:
-            raise RuntimeError("Commitment was violated")
-        if x**self.e % self.N != self.cx:
+    def check_final_answer(self, message):
+        """
+        We receive the secret alice commited to earlier and check if she cheated
+        @param message containing the secret she commited to earlier
+        """
+        commitment.check(message, self.c)
+        if self.rsa.encrypt(message) != self.cx:
             raise RuntimeError("Keys don't match. Commitment was violated")
+
